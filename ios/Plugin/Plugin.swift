@@ -81,7 +81,7 @@ public class MsAuthPlugin: CAPPlugin {
 
                 context.signout(with: currentAccount, signoutParameters: signoutParameters, completionBlock: {(_, error) in
                     if let error = error {
-                        print("Unable to logout: \(error)")
+                        print("Unable to logout: \(error.localizedDescription)")
 
                         call.reject("Unable to logout")
 
@@ -93,7 +93,7 @@ public class MsAuthPlugin: CAPPlugin {
             }
         }
     }
-    
+
     @objc func logoutAll(_ call: CAPPluginCall) {
         guard let context = createContextFromPluginCall(call) else {
             call.reject("Unable to create context, check logs")
@@ -107,31 +107,44 @@ public class MsAuthPlugin: CAPPlugin {
 
         do {
             let accounts = try context.allAccounts()
+
+            if accounts.isEmpty {
+                call.resolve()
+                return
+            }
+
+            let serialQueue = DispatchQueue(label: "nl.recognize.msauth.logoutAll")
             var completed = 0
-            
+            var hasResponded = false
+
             accounts.forEach {
                 let wvParameters = MSALWebviewParameters(authPresentationViewController: bridgeViewController)
                 let signoutParameters = MSALSignoutParameters(webviewParameters: wvParameters)
                 signoutParameters.signoutFromBrowser = false // set this to true if you also want to signout from browser or webview
-                
-                context.signout(with: $0, signoutParameters: signoutParameters, completionBlock: {(_, error) in
-                    completed += 1
 
-                    if let error = error {
-                        print("Unable to logout: \(error)")
-                        
-                        call.reject("Unable to logout")
-                        
-                        return
-                    }
-                    
-                    if completed == accounts.count {
-                        call.resolve()
+                context.signout(with: $0, signoutParameters: signoutParameters, completionBlock: {(_, error) in
+                    serialQueue.sync {
+                        if hasResponded {
+                            return
+                        }
+
+                        if let error = error {
+                            print("Unable to logout: \(error.localizedDescription)")
+                            hasResponded = true
+                            call.reject("Unable to logout")
+                            return
+                        }
+
+                        completed += 1
+                        if completed == accounts.count {
+                            hasResponded = true
+                            call.resolve()
+                        }
                     }
                 })
             }
         } catch {
-            print("Unable to logout: \(error)")
+            print("Unable to logout: \(error.localizedDescription)")
 
             call.reject("Unable to logout")
 
@@ -148,6 +161,7 @@ public class MsAuthPlugin: CAPPlugin {
         let tenant = call.getString("tenant")
         let authorityURL = call.getString("authorityUrl")
         let authorityType = call.getString("authorityType") ?? "AAD"
+        let knownAuthorities = call.getArray("knownAuthorities", String.self)
 
         if authorityType != "AAD" && authorityType != "B2C" && authorityType != "CIAM" {
             call.reject("authorityType must be one of 'AAD' or 'B2C' or 'CIAM'")
@@ -156,7 +170,7 @@ public class MsAuthPlugin: CAPPlugin {
 
         guard let enumAuthorityType = AuthorityType(rawValue: authorityType.lowercased()),
               let context = createContext(
-                clientId: clientId, domainHint: domainHint, tenant: tenant, authorityType: enumAuthorityType, customAuthorityURL: authorityURL
+                clientId: clientId, domainHint: domainHint, tenant: tenant, authorityType: enumAuthorityType, customAuthorityURL: authorityURL, knownAuthorities: knownAuthorities
               ) else {
             call.reject("Unable to create context, check logs")
             return nil
@@ -165,7 +179,22 @@ public class MsAuthPlugin: CAPPlugin {
         return context
     }
 
-    private func createContext(clientId: String, domainHint: String?, tenant: String?, authorityType: AuthorityType, customAuthorityURL: String?) -> MSALPublicClientApplication? {
+    private func createContext(clientId: String, domainHint: String?, tenant: String?, authorityType: AuthorityType, customAuthorityURL: String?, knownAuthorities: [String]?) -> MSALPublicClientApplication? {
+        if let customAuthorityURL = customAuthorityURL {
+            guard let url = URL(string: customAuthorityURL), url.scheme?.lowercased() == "https" else {
+                print("authorityUrl must use HTTPS")
+                return nil
+            }
+        }
+
+        let tenantPattern = "^[a-zA-Z0-9][a-zA-Z0-9.\\-]*$"
+        if customAuthorityURL == nil, let tenant = tenant {
+            guard tenant.range(of: tenantPattern, options: .regularExpression) != nil else {
+                print("Invalid tenant specified")
+                return nil
+            }
+        }
+
         guard let authorityURL = URL(string: customAuthorityURL ?? "https://login.microsoftonline.com/\(tenant ?? "common")") else {
             print("Invalid authorityUrl or tenant specified")
             return nil
@@ -187,10 +216,35 @@ public class MsAuthPlugin: CAPPlugin {
             }
 
             let msalConfiguration = MSALPublicClientApplicationConfig(clientId: clientId, redirectUri: nil, authority: authority)
-            msalConfiguration.knownAuthorities = [authority]
+
+            var allAuthorities: [MSALAuthority] = [authority]
+            if let knownAuthorities = knownAuthorities {
+                for urlString in knownAuthorities {
+                    guard let url = URL(string: urlString), url.scheme?.lowercased() == "https" else {
+                        print("Skipping invalid knownAuthority (must be HTTPS): \(urlString)")
+                        continue
+                    }
+                    do {
+                        let knownAuthority: MSALAuthority
+                        switch authorityType {
+                        case .aad:
+                            knownAuthority = try MSALAADAuthority(url: url)
+                        case .b2c:
+                            knownAuthority = try MSALB2CAuthority(url: url)
+                        case .ciam:
+                            knownAuthority = try MSALCIAMAuthority(url: url)
+                        }
+                        allAuthorities.append(knownAuthority)
+                    } catch {
+                        print("Unable to parse knownAuthority: \(error.localizedDescription)")
+                    }
+                }
+            }
+            msalConfiguration.knownAuthorities = allAuthorities
+
             return try MSALPublicClientApplication(configuration: msalConfiguration)
         } catch {
-            print(error)
+            print("Unable to create context: \(error.localizedDescription)")
 
             return nil
         }
@@ -212,7 +266,7 @@ public class MsAuthPlugin: CAPPlugin {
                         for tenant in tenants {
                             if let tenantId = tenant.tenantId {
                                 // Find first account where authority url matches tenant id
-                                if authorityUrl.absoluteString.contains(tenantId) { 
+                                if authorityUrl.absoluteString.contains(tenantId) {
                                     completion(account)
                                     return
                                 }
@@ -231,7 +285,7 @@ public class MsAuthPlugin: CAPPlugin {
 
         applicationContext.getCurrentAccount(with: msalParameters, completionBlock: { (currentAccount, _, error) in
             if let error = error {
-                print("Unable to query current account: \(error)")
+                print("Unable to query current account: \(error.localizedDescription)")
 
                 completion(nil)
 
@@ -264,7 +318,7 @@ public class MsAuthPlugin: CAPPlugin {
 
         applicationContext.acquireToken(with: parameters) { (result, error) in
             if let error = error {
-                print("Token could not be acquired: \(error)")
+                print("Token could not be acquired: \(error.localizedDescription)")
 
                 completion(nil)
                 return
@@ -299,7 +353,7 @@ public class MsAuthPlugin: CAPPlugin {
                     }
                 }
 
-                print("Unable to acquire token silently: \(error)")
+                print("Unable to acquire token silently: \(error.localizedDescription)")
 
                 completion(nil)
 

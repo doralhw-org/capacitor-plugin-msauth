@@ -75,6 +75,7 @@ class MsAuthPluginTest {
             public AppCompatActivity getActivity() {
                 lenient().when(applicationContext.getPackageName()).thenReturn("nl.recognize.project-x");
                 lenient().when(mockedActivity.getApplicationContext()).thenReturn(applicationContext);
+                lenient().when(mockedActivity.getFilesDir()).thenReturn(new File(System.getProperty("java.io.tmpdir")));
 
                 return mockedActivity;
             }
@@ -126,6 +127,62 @@ class MsAuthPluginTest {
         verify(singleAccountPublicClientApplication).acquireTokenSilent(
             argThat(parameters -> parameters.getAuthority().equals(AUTHORITY_URL))
         );
+    }
+
+    @Test
+    void loginRejectsNullClientId() {
+        PluginCall pluginCallMock = mock(PluginCall.class);
+        when(pluginCallMock.getString("clientId")).thenReturn(null);
+
+        plugin.login(pluginCallMock);
+
+        verify(pluginCallMock).reject("Invalid client ID specified.");
+    }
+
+    @Test
+    void loginRejectsHttpAuthorityUrl() throws JSONException {
+        PluginCall pluginCallMock = mock(PluginCall.class);
+        when(pluginCallMock.getString(any())).thenAnswer(
+            (Answer<String>) invocation -> {
+                switch (invocation.getArgument(0).toString()) {
+                    case "clientId":
+                        return CLIENT_ID;
+                    case "keyHash":
+                        return KEY_HASH;
+                    case "authorityUrl":
+                        return "http://login.microsoftonline.com/common";
+                }
+                return null;
+            }
+        );
+        when(pluginCallMock.getString("authorityType", AuthorityType.AAD.name())).thenReturn("AAD");
+
+        plugin.login(pluginCallMock);
+
+        verify(pluginCallMock).reject("authorityUrl must use HTTPS.");
+    }
+
+    @Test
+    void loginRejectsInvalidTenant() throws JSONException {
+        PluginCall pluginCallMock = mock(PluginCall.class);
+        when(pluginCallMock.getString(any())).thenAnswer(
+            (Answer<String>) invocation -> {
+                switch (invocation.getArgument(0).toString()) {
+                    case "clientId":
+                        return CLIENT_ID;
+                    case "keyHash":
+                        return KEY_HASH;
+                    case "tenant":
+                        return "../malicious";
+                }
+                return null;
+            }
+        );
+        when(pluginCallMock.getString("authorityType", AuthorityType.AAD.name())).thenReturn("AAD");
+
+        plugin.login(pluginCallMock);
+
+        verify(pluginCallMock).reject("Invalid tenant specified.");
     }
 
     private void initializePluginCallMockWithDefaults(PluginCall pluginCallMock) throws JSONException {

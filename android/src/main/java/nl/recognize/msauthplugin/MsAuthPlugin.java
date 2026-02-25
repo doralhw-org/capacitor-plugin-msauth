@@ -18,6 +18,7 @@ import java.io.IOException;
 import java.net.URLEncoder;
 import java.util.Arrays;
 import java.util.List;
+import java.util.regex.Pattern;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -28,7 +29,12 @@ import org.json.JSONObject;
 )
 public class MsAuthPlugin extends Plugin {
 
+    private static final Pattern TENANT_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9.\\-]*$");
+
     private final PublicClientApplicationFactory publicClientApplicationFactory;
+
+    private ISingleAccountPublicClientApplication cachedContext;
+    private String cachedContextKey;
 
     public MsAuthPlugin() {
         this(new DefaultPublicClientApplicationFactory());
@@ -44,13 +50,13 @@ public class MsAuthPlugin extends Plugin {
             ISingleAccountPublicClientApplication context = this.createContextFromPluginCall(call);
 
             if (context == null) {
-                call.reject("Context was null");
                 return;
             }
 
             Prompt prompt = Prompt.SELECT_ACCOUNT;
-            if (call.hasOption("prompt")) {
-                switch (call.getString("prompt").toLowerCase()) {
+            String promptString = call.getString("prompt");
+            if (promptString != null) {
+                switch (promptString.toLowerCase()) {
                     case "select_account":
                         prompt = Prompt.SELECT_ACCOUNT;
                         break;
@@ -67,7 +73,7 @@ public class MsAuthPlugin extends Plugin {
                         prompt = Prompt.CREATE;
                         break;
                     default:
-                        Logger.warn("Unrecognized prompt option: " + call.getString("prompt"));
+                        Logger.warn("Unrecognized prompt option: " + promptString);
                         break;
                 }
             }
@@ -86,7 +92,7 @@ public class MsAuthPlugin extends Plugin {
                     }
                 });
         } catch (Exception ex) {
-            Logger.error("Unable to login: " + ex.getMessage(), ex);
+            Logger.error("Unable to login", ex);
             call.reject("Unable to fetch access token.");
         }
     }
@@ -97,7 +103,6 @@ public class MsAuthPlugin extends Plugin {
             ISingleAccountPublicClientApplication context = this.createContextFromPluginCall(call);
 
             if (context == null) {
-                call.reject("Context was null");
                 return;
             }
 
@@ -113,14 +118,14 @@ public class MsAuthPlugin extends Plugin {
 
                         @Override
                         public void onError(@NonNull MsalException ex) {
-                            Logger.error("Error occurred during logout", ex);
+                            Logger.error("Error occurred during logout");
                             call.reject("Unable to sign out.");
                         }
                     }
                 );
             }
         } catch (Exception ex) {
-            Logger.error("Exception occurred during logout", ex);
+            Logger.error("Exception occurred during logout");
             call.reject("Unable to fetch context.");
         }
     }
@@ -164,7 +169,7 @@ public class MsAuthPlugin extends Plugin {
 
                 return;
             } catch (MsalUiRequiredException ex) {
-                Logger.error("Silent login failed", ex);
+                Logger.info("Silent login failed, falling back to interactive");
             }
         }
 
@@ -195,7 +200,7 @@ public class MsAuthPlugin extends Plugin {
 
                     @Override
                     public void onError(MsalException ex) {
-                        Logger.error("Unable to acquire token interactively", ex);
+                        Logger.error("Unable to acquire token interactively");
                         callback.tokenReceived(null);
                     }
                 }
@@ -219,8 +224,23 @@ public class MsAuthPlugin extends Plugin {
         String authorityUrl = call.getString("authorityUrl");
         Boolean brokerRedirectUriRegistered = call.getBoolean("brokerRedirectUriRegistered", false);
 
+        if (clientId == null || clientId.isEmpty()) {
+            call.reject("Invalid client ID specified.");
+            return null;
+        }
+
         if (keyHash == null || keyHash.length() == 0) {
             call.reject("Invalid key hash specified.");
+            return null;
+        }
+
+        if (authorityUrl != null && !authorityUrl.startsWith("https://")) {
+            call.reject("authorityUrl must use HTTPS.");
+            return null;
+        }
+
+        if (authorityUrl == null && tenant != null && !TENANT_PATTERN.matcher(tenant).matches()) {
+            call.reject("Invalid tenant specified.");
             return null;
         }
 
@@ -252,6 +272,11 @@ public class MsAuthPlugin extends Plugin {
         String authorityUrl = customAuthorityUrl != null ? customAuthorityUrl : "https://login.microsoftonline.com/" + tenantId;
         String urlEncodedKeyHash = URLEncoder.encode(keyHash, "UTF-8");
         String redirectUri = "msauth://" + getActivity().getApplicationContext().getPackageName() + "/" + urlEncodedKeyHash;
+
+        String contextKey = clientId + "|" + authorityUrl + "|" + keyHash + "|" + authorityType.name();
+        if (cachedContext != null && contextKey.equals(cachedContextKey)) {
+            return cachedContext;
+        }
 
         JSONObject configFile = new JSONObject();
         JSONObject authorityConfig = new JSONObject();
@@ -287,14 +312,18 @@ public class MsAuthPlugin extends Plugin {
         );
 
         if (!config.delete()) {
-            Logger.warn("Warning! Unable to delete config file.");
+            Logger.error("Unable to delete config file.");
+            config.deleteOnExit();
         }
+
+        cachedContext = app;
+        cachedContextKey = contextKey;
 
         return app;
     }
 
     private File writeJSONObjectConfig(JSONObject data) throws IOException {
-        File config = new File(getActivity().getFilesDir() + "auth_config.json");
+        File config = new File(getActivity().getFilesDir(), "auth_config.json");
 
         try (FileWriter writer = new FileWriter(config, false)) {
             writer.write(data.toString());
