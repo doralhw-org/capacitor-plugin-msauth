@@ -6,7 +6,17 @@ var capacitorMsAuth = (function (exports, core, msalBrowser) {
         async login(options) {
             const context = await this.createContext(options);
             try {
-                return await this.acquireTokenSilently(context, options.scopes).catch(() => this.acquireTokenInteractively(context, options.scopes));
+                if (options.interactionType === 'redirect') {
+                    const redirectResult = await context.handleRedirectPromise();
+                    if (redirectResult) {
+                        return {
+                            accessToken: redirectResult.accessToken,
+                            idToken: redirectResult.idToken,
+                            scopes: redirectResult.scopes,
+                        };
+                    }
+                }
+                return await this.acquireTokenSilently(context, options.scopes).catch(() => this.acquireTokenInteractively(context, options));
             }
             catch (error) {
                 console.error('MSAL: Error occurred while logging in', error);
@@ -15,12 +25,16 @@ var capacitorMsAuth = (function (exports, core, msalBrowser) {
         }
         async logout(options) {
             const context = await this.createContext(options);
+            if (options.interactionType === 'redirect') {
+                await context.handleRedirectPromise();
+            }
             if (!context.getAllAccounts()[0]) {
                 return Promise.reject(new Error('Nothing to sign out from.'));
             }
-            else {
-                return context.logoutPopup();
+            if (options.interactionType === 'redirect') {
+                return context.logoutRedirect();
             }
+            return context.logoutPopup();
         }
         logoutAll(options) {
             return this.logout(options);
@@ -42,7 +56,7 @@ var capacitorMsAuth = (function (exports, core, msalBrowser) {
                     redirectUri: options.redirectUri ?? this.getCurrentUrl(),
                 },
                 cache: {
-                    cacheLocation: 'sessionStorage',
+                    cacheLocation: options.interactionType === 'redirect' ? 'localStorage' : 'sessionStorage',
                 },
             };
             return await msalBrowser.PublicClientApplication.createPublicClientApplication(config);
@@ -50,12 +64,21 @@ var capacitorMsAuth = (function (exports, core, msalBrowser) {
         getCurrentUrl() {
             return window.location.href.split(/[?#]/)[0];
         }
-        async acquireTokenInteractively(context, scopes) {
+        async acquireTokenInteractively(context, options) {
+            const prompt = options.prompt ?? 'select_account';
+            if (options.interactionType === 'redirect') {
+                await context.acquireTokenRedirect({
+                    scopes: options.scopes,
+                    prompt,
+                });
+                // acquireTokenRedirect navigates away; this promise never resolves in practice.
+                return new Promise(() => { });
+            }
             const { accessToken, idToken } = await context.acquireTokenPopup({
-                scopes,
-                prompt: 'select_account',
+                scopes: options.scopes,
+                prompt,
             });
-            return { accessToken, idToken, scopes };
+            return { accessToken, idToken, scopes: options.scopes };
         }
         async acquireTokenSilently(context, scopes) {
             const { accessToken, idToken } = await context.acquireTokenSilent({

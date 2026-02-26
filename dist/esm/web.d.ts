@@ -5,6 +5,7 @@ interface WebBaseOptions extends BaseOptions {
 }
 interface WebLoginOptions extends WebBaseOptions {
     scopes: string[];
+    prompt?: 'login' | 'none' | 'consent' | 'create' | 'select_account';
 }
 type WebLogoutOptions = WebBaseOptions;
 interface AuthResult {

@@ -9,6 +9,7 @@ interface WebBaseOptions extends BaseOptions {
 
 interface WebLoginOptions extends WebBaseOptions {
   scopes: string[];
+  prompt?: 'login' | 'none' | 'consent' | 'create' | 'select_account';
 }
 
 type WebLogoutOptions = WebBaseOptions;
@@ -26,8 +27,19 @@ export class MsAuth extends WebPlugin implements MsAuthPlugin {
     const context = await this.createContext(options);
 
     try {
+      if (options.interactionType === 'redirect') {
+        const redirectResult = await context.handleRedirectPromise();
+        if (redirectResult) {
+          return {
+            accessToken: redirectResult.accessToken,
+            idToken: redirectResult.idToken,
+            scopes: redirectResult.scopes,
+          };
+        }
+      }
+
       return await this.acquireTokenSilently(context, options.scopes).catch(() =>
-        this.acquireTokenInteractively(context, options.scopes),
+        this.acquireTokenInteractively(context, options),
       );
     } catch (error) {
       console.error('MSAL: Error occurred while logging in', error);
@@ -39,11 +51,19 @@ export class MsAuth extends WebPlugin implements MsAuthPlugin {
   async logout(options: WebLogoutOptions): Promise<void> {
     const context = await this.createContext(options);
 
+    if (options.interactionType === 'redirect') {
+      await context.handleRedirectPromise();
+    }
+
     if (!context.getAllAccounts()[0]) {
       return Promise.reject(new Error('Nothing to sign out from.'));
-    } else {
-      return context.logoutPopup();
     }
+
+    if (options.interactionType === 'redirect') {
+      return context.logoutRedirect();
+    }
+
+    return context.logoutPopup();
   }
 
   logoutAll(options: WebLogoutOptions): Promise<void> {
@@ -69,7 +89,7 @@ export class MsAuth extends WebPlugin implements MsAuthPlugin {
         redirectUri: options.redirectUri ?? this.getCurrentUrl(),
       },
       cache: {
-        cacheLocation: 'sessionStorage' as const,
+        cacheLocation: options.interactionType === 'redirect' ? 'localStorage' : 'sessionStorage',
       },
     };
 
@@ -80,13 +100,24 @@ export class MsAuth extends WebPlugin implements MsAuthPlugin {
     return window.location.href.split(/[?#]/)[0];
   }
 
-  private async acquireTokenInteractively(context: IPublicClientApplication, scopes: string[]): Promise<AuthResult> {
+  private async acquireTokenInteractively(context: IPublicClientApplication, options: WebLoginOptions): Promise<AuthResult> {
+    const prompt = options.prompt ?? 'select_account';
+
+    if (options.interactionType === 'redirect') {
+      await context.acquireTokenRedirect({
+        scopes: options.scopes,
+        prompt,
+      });
+      // acquireTokenRedirect navigates away; this promise never resolves in practice.
+      return new Promise(() => {});
+    }
+
     const { accessToken, idToken } = await context.acquireTokenPopup({
-      scopes,
-      prompt: 'select_account',
+      scopes: options.scopes,
+      prompt,
     });
 
-    return { accessToken, idToken, scopes };
+    return { accessToken, idToken, scopes: options.scopes };
   }
 
   private async acquireTokenSilently(context: IPublicClientApplication, scopes: string[]): Promise<AuthResult> {

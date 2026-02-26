@@ -7,6 +7,7 @@ export interface BaseOptions {
     knownAuthorities?: string[];
     keyHash?: string;
     brokerRedirectUriRegistered?: boolean;
+    interactionType?: 'popup' | 'redirect';
 }
 export interface LoginOptions extends BaseOptions {
     /** MSAL always sends the scopes 'openid profile offline_access'.  Do not include any of these scopes in the scopes parameter. */
